@@ -72,19 +72,19 @@ check_hook(char **newval, void **extra, GucSource source)
     return false;
   }
 
-  D1("Checking if absolute path");
   if(!is_absolute_path(*newval)){
+    D1("%s = '%s' is not an absolute path", SQLITE_FS_LOCATION, *newval);
     GUC_check_errmsg("%s must be an absolute path: %s", SQLITE_FS_LOCATION, *newval);
     return false;
   }
 
   /* Since canonicalize_path never enlarges the string, we can just modify newval in-place. */
-  D1("canonicalize");
+  D3("canonicalize");
   canonicalize_path(*newval);
 
   /* Do not allow modifying the DataDir */
-  D1("Checking if inside DataDir (%s)", DataDir);
   if (path_is_prefix_of_path(DataDir, *newval)){
+    D1("%s = '%s' is inside DataDir: %s", SQLITE_FS_LOCATION, *newval, DataDir);
     GUC_check_errmsg("%s cannot be inside the DataDir %s", *newval, DataDir);
     return false;
   }
