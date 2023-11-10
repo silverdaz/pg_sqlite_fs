@@ -119,20 +119,25 @@ static char *
 convert_and_check_path(text *arg)
 {
   char	*path = text_to_cstring(arg);
+  D1("Checking and converting %s", path);
 
   canonicalize_path(path);	/* path can change length here */
   
   if (!is_absolute_path(path))
     ereport(ERROR,
 	    (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-	     errmsg("path must be absolute")));
+	     errmsg("path \"%s\" must be absolute", path)));
 
   /* Allow absolute paths if within pg_sqlite_fs_location */
-  D3("Checking if path %s is inside %s", path, pg_sqlite_fs_location);
+  if (pg_sqlite_fs_location == NULL)
+    ereport(ERROR,
+	    (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+	     errmsg("\"%s\" is not set or invalid | current value: %s", SQLITE_FS_LOCATION, pg_sqlite_fs_location)));
+
   if (!path_is_prefix_of_path(pg_sqlite_fs_location, path))
     ereport(ERROR,
 	    (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-	     errmsg("path must be below the sqlite_fs directory: %s", pg_sqlite_fs_location)));
+	     errmsg("path \"%s\" must be below the \"%s\" directory: %s", path, SQLITE_FS_LOCATION, pg_sqlite_fs_location)));
   
   return path;
 }
