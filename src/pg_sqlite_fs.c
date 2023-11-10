@@ -177,7 +177,7 @@ pg_sqlite_fs_create(PG_FUNCTION_ARGS)
     goto bailout;
   }
 
-  N("Database open: %s", db_path);
+  D1("Database open: %s", db_path);
 
   /* Execute SQL statement */
   rc = sqlite3_exec(db,
@@ -244,7 +244,7 @@ pg_sqlite_fs_create(PG_FUNCTION_ARGS)
     goto bailout;
   }
 
-  D3("Sqlite_Fs Successfully created: %s", db_path);
+  D3("Successfully created: %s", db_path);
   rc = 0; // success
   
 bailout:
