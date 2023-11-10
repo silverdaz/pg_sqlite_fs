@@ -1,6 +1,6 @@
-# Makefile to build the pg_amqp extension
+# Makefile to build the pg_sqlite_fs extension
 
-EXTENSION = sqlite_fs
+EXTENSION = pg_sqlite_fs
 
 DATA_built = $(EXTENSION)--1.0.sql
 DATA = $(wildcard $(EXTENSION)--*--*.sql)

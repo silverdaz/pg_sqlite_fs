@@ -44,8 +44,7 @@ PG_MODULE_MAGIC; /* only one time */
 #define SQLITE_FS_LOCATION "sqlite_fs.location"
 
 /* global settings */
-static char* pg_sqlite_fs_sqlite_fs_location = NULL;
-static size_t pg_sqlite_fs_sqlite_fs_location_len = 0;
+static char* pg_sqlite_fs_location = NULL;
 
 void _PG_init(void);
 static char * convert_and_check_path(text *arg);
@@ -54,7 +53,7 @@ static bool
 check_hook(char **newval, void **extra, GucSource source)
 {
 
-  D3("Check " SQLITE_FS_LOCATION " [%d]: newval %s", (int)source, (char*)*newval);
+  D1("Check " SQLITE_FS_LOCATION " [%d]: newval %s", (int)source, (char*)*newval);
 
   if (source == PGC_S_DEFAULT){
     GUC_check_errmsg("%s ignored when setting default value", SQLITE_FS_LOCATION);
@@ -63,7 +62,7 @@ check_hook(char **newval, void **extra, GucSource source)
   }
 
   if (source != PGC_S_FILE){
-    GUC_check_errmsg("%s ignored when source source is not %d", SQLITE_FS_LOCATION, PGC_S_FILE);
+    GUC_check_errmsg("%s ignored when source is not %d", SQLITE_FS_LOCATION, PGC_S_FILE);
     GUC_check_errhint("%s can only be set from postgres.conf.", SQLITE_FS_LOCATION);
     return false;
   }
@@ -73,25 +72,24 @@ check_hook(char **newval, void **extra, GucSource source)
     return false;
   }
 
+  D1("Checking if absolute path");
   if(!is_absolute_path(*newval)){
     GUC_check_errmsg("%s must be an absolute path: %s", SQLITE_FS_LOCATION, *newval);
     return false;
   }
 
-  D3("canonicalize");
-
   /* Since canonicalize_path never enlarges the string, we can just modify newval in-place. */
+  D1("canonicalize");
   canonicalize_path(*newval);
 
-  D3("remove trailing /");
-  pg_sqlite_fs_sqlite_fs_location_len = strlen(*newval);
-
-  /* Remove trailing slash (for path_is_prefix_of_path) */
-  if( *newval[pg_sqlite_fs_sqlite_fs_location_len-1] == '/' ){
-    *newval[pg_sqlite_fs_sqlite_fs_location_len-1] = '\0';
-    pg_sqlite_fs_sqlite_fs_location_len--; // adjust size
+  /* Do not allow modifying the DataDir */
+  D1("Checking if inside DataDir (%s)", DataDir);
+  if (path_is_prefix_of_path(DataDir, *newval)){
+    GUC_check_errmsg("%s cannot be inside the DataDir %s", *newval, DataDir);
+    return false;
   }
 
+  /* Finally, we don't bother removing the trailing / */
   return true;
 }
 
@@ -106,7 +104,7 @@ _PG_init(void)
   DefineCustomStringVariable(SQLITE_FS_LOCATION,
 			     gettext_noop("The sqlite_fs top directory."),
 			     NULL,
-			     &pg_sqlite_fs_sqlite_fs_location,
+			     &pg_sqlite_fs_location,
 			     NULL, /* no default */
 			     PGC_USERSET,
  			     0,
@@ -129,11 +127,12 @@ convert_and_check_path(text *arg)
 	    (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 	     errmsg("path must be absolute")));
 
-  /* Allow absolute paths if within pg_sqlite_fs_sqlite_fs_location */
-  if (!path_is_prefix_of_path(pg_sqlite_fs_sqlite_fs_location, path))
+  /* Allow absolute paths if within pg_sqlite_fs_location */
+  D3("Checking if path %s is inside %s", path, pg_sqlite_fs_location);
+  if (!path_is_prefix_of_path(pg_sqlite_fs_location, path))
     ereport(ERROR,
 	    (errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-	     errmsg("path must be below the sqlite_fs directory: %s", pg_sqlite_fs_sqlite_fs_location)));
+	     errmsg("path must be below the sqlite_fs directory: %s", pg_sqlite_fs_location)));
   
   return path;
 }
