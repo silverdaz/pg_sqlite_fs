@@ -5,7 +5,7 @@ DO $$
 BEGIN
    IF current_setting('sqlite_fs.location') IS NULL 
    THEN
-      RAISE EXCEPTION 'Missing Sqlite_Fs settings'
+      RAISE EXCEPTION 'Missing sqlite_fs settings'
       USING HINT = 'Add sqlite_fs.location = ''...'' in postgresql.conf ';
    END IF;
 END;
@@ -30,11 +30,12 @@ RETURNS boolean
 AS 'MODULE_PATHNAME', 'pg_sqlite_fs_remove'
 LANGUAGE C IMMUTABLE STRICT;
 
-CREATE OR REPLACE FUNCTION insert_file(text, bigint, text, bytea)
+CREATE OR REPLACE FUNCTION insert_file(filename text, inode bigint,
+                                       mountpoint text, relative_path text,
+                                       header bytea, payload_size bigint, prepend bytea, append bytea)
 RETURNS boolean
 AS 'MODULE_PATHNAME', 'pg_sqlite_fs_insert_file'
-LANGUAGE C IMMUTABLE STRICT;
--- STRICT  = NULL parameters return NULL immediately
+LANGUAGE C IMMUTABLE; -- NO STRICT
 
 CREATE OR REPLACE FUNCTION delete_file(text, bigint)
 RETURNS boolean
@@ -54,11 +55,10 @@ LANGUAGE C IMMUTABLE STRICT;
 
 
 CREATE OR REPLACE FUNCTION insert_entry(text, bigint, text, bigint,
-		    		        decrypted_size text, -- can be null
-       					ctime bigint DEFAULT 0,
-					mtime bigint DEFAULT 0,
-  					nlink bigint DEFAULT 1,
-   					size  bigint DEFAULT 0,
+		    		        ctime  bigint DEFAULT 0,
+					mtime  bigint DEFAULT 0,
+  					nlink  bigint DEFAULT 1,
+   					size   bigint DEFAULT 0,
 					is_dir boolean DEFAULT TRUE)
 RETURNS void
 AS 'MODULE_PATHNAME', 'pg_sqlite_fs_insert_entry'

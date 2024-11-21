@@ -119,7 +119,7 @@ static char *
 convert_and_check_path(text *arg)
 {
   char	*path = text_to_cstring(arg);
-  D1("Checking and converting %s", path);
+  D3("Checking and converting %s", path);
 
   canonicalize_path(path);	/* path can change length here */
   
@@ -181,15 +181,34 @@ pg_sqlite_fs_create(PG_FUNCTION_ARGS)
 
   /* Execute SQL statement */
   rc = sqlite3_exec(db,
-		    "CREATE TABLE IF NOT EXISTS files ("
-		    "  inode    INT64 PRIMARY KEY,"
-		    "  path     text NOT NULL,"
-		    "  header   BLOB NOT NULL"
+                    "CREATE TABLE IF NOT EXISTS files ("
+		    "  inode         INT64 PRIMARY KEY,"
+		    "  mountpoint    text,"
+		    "  rel_path      text,"
+		    "  header        BLOB,"
+		    "  payload_size  INT64 NOT NULL DEFAULT 0," // (decrypted) size on disk
+		    "  prepend       BLOB,"
+		    "  append        BLOB"
 		    ");",
 		    NULL, NULL, &err);
    
   if( rc != SQLITE_OK ){
     N("SQL error creating files table: %s", err);
+    rc = 2;
+    goto bailout;
+  }
+
+  rc = sqlite3_exec(db,
+                    "CREATE TABLE IF NOT EXISTS extended_attributes ("
+                    "    inode             INT64 NOT NULL,"
+                    "    name              text NOT NULL,"
+                    "    value             text NOT NULL,"
+                    "    PRIMARY KEY(inode,name)"
+                    ");",
+		    NULL, NULL, &err);
+   
+  if( rc != SQLITE_OK ){
+    N("SQL error creating the extended_attributes table: %s", err);
     rc = 2;
     goto bailout;
   }
@@ -201,9 +220,8 @@ pg_sqlite_fs_create(PG_FUNCTION_ARGS)
     		    "    parent_inode      INT64 NOT NULL REFERENCES entries(inode),"
     		    "    ctime             INT64 NOT NULL DEFAULT 0,"
     		    "    mtime             INT64 NOT NULL DEFAULT 0,"
-    		    "    nlink             INT64 NOT NULL DEFAULT 1,"
+    		    "    nlink             INT NOT NULL DEFAULT 1,"
     		    "    size              INT64 NOT NULL DEFAULT 0,"
-		    "    decrypted_size    text,"
 		    "    is_dir            INT NOT NULL DEFAULT 1" // -- if 0, then JOIN with files table
 		    ");",
 		    NULL, NULL, &err);
@@ -287,15 +305,18 @@ pg_sqlite_fs_insert_file(PG_FUNCTION_ARGS)
   char* db_path;
   sqlite3 *db;
   sqlite3_stmt *stmt = NULL;
-  text* p;
-  bytea *h;
+  text  *rpath = NULL;
+  text  *mnt = NULL;
+  bytea *header = NULL;
+  bytea *prepend = NULL;
+  bytea *append = NULL;
 
-  if(PG_NARGS() != 4){
-    E("Invalid number of arguments: expected 4, got %d", PG_NARGS());
+  if(PG_NARGS() != 8){
+    E("Invalid number of arguments: expected 7, got %d", PG_NARGS());
     PG_RETURN_BOOL(false);
   }
 
-  if(PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) || PG_ARGISNULL(3)){
+  if(PG_ARGISNULL(0) || PG_ARGISNULL(1) /* || PG_ARGISNULL(2) || PG_ARGISNULL(3) || PG_ARGISNULL(4) || PG_ARGISNULL(5) */){
     E("Null arguments not accepted");
     PG_RETURN_BOOL(false);
   }
@@ -313,13 +334,24 @@ pg_sqlite_fs_insert_file(PG_FUNCTION_ARGS)
   D2("Database open: %s", db_path);
 
   /* SQL statement */
-  p = PG_GETARG_TEXT_PP(2);
-  h = PG_GETARG_BYTEA_PP(3);
+  if(!PG_ARGISNULL(2)) mnt = PG_GETARG_TEXT_PP(2);
+  if(!PG_ARGISNULL(3)) rpath = PG_GETARG_TEXT_PP(3);
+  if(!PG_ARGISNULL(4)) header = PG_GETARG_BYTEA_PP(4);
+  // 5: payload_size
+  if(!PG_ARGISNULL(6)) prepend = PG_GETARG_BYTEA_PP(6);
+  if(!PG_ARGISNULL(7)) append = PG_GETARG_BYTEA_PP(7);
+
+  D1("Inserting %.*s/%.*s", (int)VARSIZE_ANY_EXHDR(mnt), VARDATA_ANY(mnt), (int)VARSIZE_ANY_EXHDR(rpath), VARDATA_ANY(rpath));
 
   rc = sqlite3_prepare_v2(db,
-			  "INSERT INTO files(inode,path,header)"
-			  " VALUES(?,?,?)"
-			  " ON CONFLICT(inode) DO UPDATE SET path=excluded.path, header=excluded.header;",
+			  "INSERT INTO files(inode,mountpoint,rel_path,header,payload_size,prepend,append)"
+			  " VALUES(?,?,?,?,?,?,?)"
+			  " ON CONFLICT(inode) DO UPDATE SET mountpoint=excluded.mountpoint,"
+			                                   " rel_path=excluded.rel_path,"
+			                                   " header=excluded.header,"
+			                                   " payload_size=excluded.payload_size,"
+			                                   " prepend=excluded.prepend,"
+			                                   " append=excluded.append;",
 			  -1, &stmt, NULL);
   if( rc != SQLITE_OK ) {
     N("Error preparing statement: %s", sqlite3_errmsg(db));
@@ -330,13 +362,30 @@ pg_sqlite_fs_insert_file(PG_FUNCTION_ARGS)
   /* Bind arguments */
   D2("Binding arguments for inserting file");
   rc = (sqlite3_bind_int64(stmt, 1, PG_GETARG_INT64(1)) ||
-	sqlite3_bind_text(stmt, 2, VARDATA_ANY(p), (int)VARSIZE_ANY_EXHDR(p), SQLITE_STATIC) || // we handle destruction
-	sqlite3_bind_blob(stmt, 3, VARDATA_ANY(h), (int)VARSIZE_ANY_EXHDR(h), SQLITE_STATIC) // we handle destruction
+	( (PG_ARGISNULL(2)) ? sqlite3_bind_null(stmt, 2)
+	                    : sqlite3_bind_text(stmt, 2, VARDATA_ANY(mnt), (int)VARSIZE_ANY_EXHDR(mnt), SQLITE_STATIC)) || // we handle destruction
+	( (PG_ARGISNULL(3)) ? sqlite3_bind_null(stmt, 3)
+ 	                    : sqlite3_bind_text(stmt, 3, VARDATA_ANY(rpath), (int)VARSIZE_ANY_EXHDR(rpath), SQLITE_STATIC)) || // we handle destruction
+	( (PG_ARGISNULL(4)) ? sqlite3_bind_null(stmt, 4)
+	                    : sqlite3_bind_blob(stmt, 4, VARDATA_ANY(header), (int)VARSIZE_ANY_EXHDR(header), SQLITE_STATIC) ) ||
+	sqlite3_bind_int64(stmt, 5,  ((PG_ARGISNULL(5)) ? 0 : PG_GETARG_INT64(5))) ||
+	( (PG_ARGISNULL(6)) ? sqlite3_bind_null(stmt, 6)
+	                    : sqlite3_bind_blob(stmt, 6, VARDATA_ANY(prepend), (int)VARSIZE_ANY_EXHDR(prepend), SQLITE_STATIC) ) ||
+	                      // sqlite3_bind_blob64 is too much, come on!
+	( (PG_ARGISNULL(7)) ? sqlite3_bind_null(stmt, 7)
+	                    : sqlite3_bind_blob(stmt, 7, VARDATA_ANY(append), (int)VARSIZE_ANY_EXHDR(append), SQLITE_STATIC) )
+	                      // sqlite3_bind_blob64 is too much, come on!
 	);
   if( rc != SQLITE_OK ){
     N("SQL error binding arguments: %s", sqlite3_errmsg(db));
     rc = 2;
     goto bailout;
+  }
+
+  {
+    char* expanded_sql = sqlite3_expanded_sql(stmt);
+    D1("expanded statement: %s", expanded_sql);
+    sqlite3_free(expanded_sql);
   }
 
   /* Execute SQL prepared statement */
@@ -400,18 +449,16 @@ pg_sqlite_fs_insert_entry(PG_FUNCTION_ARGS)
 
   /* SQL statement */
   rc = sqlite3_prepare_v2(db,
-			  "INSERT INTO entries(inode,name,parent_inode,decrypted_size,ctime,mtime,nlink,size,is_dir)"
-			  "VALUES(?,?,?,?,?,?,?,?,?)"
+			  "INSERT INTO entries(inode,name,parent_inode,ctime,mtime,nlink,size,is_dir)"
+			  "VALUES(?,?,?,?,?,?,?,?)"
 			  //" ON CONFLICT(inode) DO NOTHING;",
-			  " ON CONFLICT(inode) DO UPDATE SET "
-			  "name=excluded.name,"
-			  "parent_inode=excluded.parent_inode,"
-			  "decrypted_size=excluded.decrypted_size,"
-			  "ctime=excluded.ctime,"
-			  "mtime=excluded.mtime,"
-			  "nlink=excluded.nlink,"
-			  "size=excluded.size,"
-			  "is_dir=excluded.is_dir;",
+			  " ON CONFLICT(inode) DO UPDATE SET name=excluded.name,"
+			                                   " parent_inode=excluded.parent_inode,"
+			                                   " ctime=excluded.ctime,"
+			                                   " mtime=excluded.mtime,"
+			                                   " nlink=excluded.nlink,"
+			                                   " size=excluded.size,"
+			                                   " is_dir=excluded.is_dir;",
 			  -1, &stmt, NULL);
   if( rc != SQLITE_OK ) {
     N("Error preparing statement: %s", sqlite3_errmsg(db));
@@ -422,24 +469,15 @@ pg_sqlite_fs_insert_entry(PG_FUNCTION_ARGS)
   /* Bind arguments */
   D2("Binding arguments while inserting entry");
 
-  if(PG_ARGISNULL(4)){
-    rc = sqlite3_bind_null(stmt, 4);
-  } else {
-    text* decrypted_size = PG_GETARG_TEXT_PP(4);
-    rc = sqlite3_bind_text( stmt, 4, VARDATA_ANY(decrypted_size), (int)VARSIZE_ANY_EXHDR(decrypted_size), SQLITE_STATIC);
-    // we handle destruction
-  }
-
   rc = rc ||
     (sqlite3_bind_int64(stmt, 1, inode) ||
      sqlite3_bind_text( stmt, 2, VARDATA_ANY(name), (int)VARSIZE_ANY_EXHDR(name), SQLITE_STATIC) || // we handle destruction
      sqlite3_bind_int64(stmt, 3, parent_inode) ||
-     // 4: decrypted_size
-     sqlite3_bind_int64(stmt, 5, PG_GETARG_INT64(5)) || // ctime
-     sqlite3_bind_int64(stmt, 6, PG_GETARG_INT64(6)) || // mtime
-     sqlite3_bind_int64(stmt, 7, PG_GETARG_INT64(7)) || // nlink
-     sqlite3_bind_int64(stmt, 8, PG_GETARG_INT64(8)) || // size
-     sqlite3_bind_int(  stmt, 9, (PG_GETARG_BOOL(9))?1:0) // is_dir
+     sqlite3_bind_int64(stmt, 4, PG_GETARG_INT64(4)) || // ctime
+     sqlite3_bind_int64(stmt, 5, PG_GETARG_INT64(5)) || // mtime
+     sqlite3_bind_int64(stmt, 6, PG_GETARG_INT64(6)) || // nlink
+     sqlite3_bind_int64(stmt, 7, PG_GETARG_INT64(7)) || // size
+     sqlite3_bind_int(  stmt, 8, (PG_GETARG_BOOL(8))?1:0) // is_dir
      );
   if( rc != SQLITE_OK ) {
     N("Error binding main arguments: %s", sqlite3_errmsg(db));
@@ -483,10 +521,10 @@ pg_sqlite_fs_delete_file(PG_FUNCTION_ARGS)
     if( rc != SQLITE_OK )
       E("SQL error opening database: %s | error %d: %s", db_path, rc, sqlite3_errstr(rc));
 	
-    /* rc = sqlite3_prepare_v3(db, */
-    /* 			    "DELETE FROM files WHERE inode = ?;", */
-    /* 			    -1, SQLITE_PREPARE_PERSISTENT, /\* reused *\/ */
-    /* 			    &stmt, NULL); */
+    /* rc = sqlite3_prepare_v3(db,
+			    "DELETE FROM files WHERE inode = ?;",
+			    -1, SQLITE_PREPARE_PERSISTENT, // reused
+			    &stmt, NULL); */
     rc = sqlite3_prepare_v2(db,
 			   "DELETE FROM files WHERE inode = ?;",
 			   -1, &stmt, NULL);
@@ -532,7 +570,9 @@ pg_sqlite_fs_delete_entry(PG_FUNCTION_ARGS)
       E("SQL error opening database: %s | error %d: %s", db_path, rc, sqlite3_errstr(rc));
 	
     rc = sqlite3_prepare_v2(db,
-			   "DELETE FROM entries WHERE inode = ?1 or parent_inode = ?1;",
+			   "DELETE FROM entries WHERE inode = ?1 OR parent_inode = ?1;",
+			    // Note: in case of directory: missing some sub-directories
+			    // => Use recursive with condition
 			   -1, &stmt, NULL);
 
     inode = PG_GETARG_INT64(1);
@@ -566,13 +606,12 @@ bailout:
 
 
 static bool
-pg_sqlite_fs_truncate_table(PG_FUNCTION_ARGS, const char* table, const char* where_clause)
+pg_sqlite_fs_truncate_table(PG_FUNCTION_ARGS, const char* sql)
 {
     int rc = 1;
     char* db_path;
     sqlite3 *db;
     char* err = NULL;
-    char* sql = NULL;
 
     db_path = convert_and_check_path(PG_GETARG_TEXT_PP(0)); // allocated in the function context: will be cleaned by PG
     N("Opening database %s", db_path);
@@ -581,42 +620,33 @@ pg_sqlite_fs_truncate_table(PG_FUNCTION_ARGS, const char* table, const char* whe
     if( rc != SQLITE_OK )
       E("SQL error opening database: %s | error %d: %s", db_path, rc, sqlite3_errstr(rc));
 	
-    /* Execute SQL prepared statement */
-    D1("Execute statement for truncating %s", table);
-    // See https://www.sqlite.org/lang_delete.html#the_truncate_optimization
-    if(asprintf(&sql, "DELETE FROM %s%s", table, where_clause) < 0){ 
-      rc = 1;
-      goto bailout;
-    }
+    D1("Execute statement: %s", sql);
     rc = sqlite3_exec(db, sql, NULL, NULL, &err);
    
-    if( rc != SQLITE_OK ){
-      N("SQL error in %s: %s", db_path, err);
-      rc = 2;
-      goto bailout;
-    }
+    if( rc != SQLITE_OK )
+      N("SQL error for '%s' in %s: %s", sql, db_path, err);
 
-    rc = 0; // success
+    if(err)
+      sqlite3_free(err);
 
-bailout:
-    if(sql) free(sql);
-    if(err) sqlite3_free(err);
     sqlite3_close(db);
-    return (rc)?false:true;
+
+    return (rc == SQLITE_OK)?true:false;
 }
 
 PG_FUNCTION_INFO_V1(pg_sqlite_fs_truncate_entries);
 Datum
 pg_sqlite_fs_truncate_entries(PG_FUNCTION_ARGS)
 {
-  PG_RETURN_BOOL(pg_sqlite_fs_truncate_table(fcinfo, "entries", "WHERE inode > 1"));
+  PG_RETURN_BOOL(pg_sqlite_fs_truncate_table(fcinfo, "DELETE FROM entries WHERE inode > 1"));
 }
 
 PG_FUNCTION_INFO_V1(pg_sqlite_fs_truncate_files);
 Datum
 pg_sqlite_fs_truncate_files(PG_FUNCTION_ARGS)
 {
-  PG_RETURN_BOOL(pg_sqlite_fs_truncate_table(fcinfo, "files", ""));
+  // See https://www.sqlite.org/lang_delete.html#the_truncate_optimization
+  PG_RETURN_BOOL(pg_sqlite_fs_truncate_table(fcinfo, "DELETE FROM files"));
 }
 
 
@@ -697,7 +727,6 @@ pg_sqlite_fs_insert_files(PG_FUNCTION_ARGS)
   sqlite3_stmt *stmt = NULL;
   char *sql = NULL;
   int i;
-  bool isnull;
 
   if(PG_NARGS() != 2){
     E("Invalid number of arguments: expected 2, got %d", PG_NARGS());
@@ -730,9 +759,14 @@ pg_sqlite_fs_insert_files(PG_FUNCTION_ARGS)
 
   /* SQL prepared statement */
   rc = sqlite3_prepare_v2(db,
-			  "INSERT INTO files(inode,path,header)"
-			  " VALUES(?,?,?)"
-			  " ON CONFLICT(inode) DO UPDATE SET path=excluded.path, header=excluded.header;",
+			  "INSERT INTO files(inode,mountpoint,rel_path,header,payload_size,prepend,append)"
+			  " VALUES(?,?,?,?,?,?,?)"
+			  " ON CONFLICT(inode) DO UPDATE SET mountpoint=excluded.mountpoint,"
+			  "                                  rel_path=excluded.rel_path,"
+			  "                                  header=excluded.header,"
+			  "                                  payload_size=excluded.payload_size,"
+			  "                                  prepend=excluded.prepend,"
+			  "                                  append=excluded.append;",
 			  -1, &stmt, NULL);
   if( rc != SQLITE_OK ) {
     N("Error preparing statement: %s", sqlite3_errmsg(db));
@@ -765,22 +799,30 @@ pg_sqlite_fs_insert_files(PG_FUNCTION_ARGS)
   }
 
   /* Check the SQL statement to be executed */ 
-  if(SPI_tuptable->tupdesc->natts != 3){
-    W("SPI_execute returns %d fields. Expecting 3", SPI_tuptable->tupdesc->natts);
+  if(SPI_tuptable->tupdesc->natts != 4){
+    W("SPI_execute returns %d fields. Expecting 4", SPI_tuptable->tupdesc->natts);
     rc = 3;
     goto bailout_spi;
   }
 
   SQLITE_FS_CHECK_TYPE(0, INT8OID, "inode");
-  SQLITE_FS_CHECK_TYPE(1, TEXTOID, "path");
-  SQLITE_FS_CHECK_TYPE(2, BYTEAOID, "header");
+  SQLITE_FS_CHECK_TYPE(1, TEXTOID, "mountpoint");
+  SQLITE_FS_CHECK_TYPE(2, TEXTOID, "rel_path");
+  SQLITE_FS_CHECK_TYPE(3, BYTEAOID, "header");
+  SQLITE_FS_CHECK_TYPE(4, INT8OID, "payload_size");
+  SQLITE_FS_CHECK_TYPE(5, BYTEAOID, "prepend");
+  SQLITE_FS_CHECK_TYPE(6, BYTEAOID, "append");
 
 
   for(i=0 ; i < SPI_processed; i++){
 
     bytea *header;
+    bytea *prepend;
+    bytea *append;
     text *path;
-    int64 inode;
+    text *mountpoint;
+    int64 inode, payload_size;
+    bool isnull, header_isnull, prepend_isnull, append_isnull;
 
     rc = 1;
 
@@ -790,23 +832,36 @@ pg_sqlite_fs_insert_files(PG_FUNCTION_ARGS)
       goto bailout_spi;
     }
 
-    path = DatumGetTextPP(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 2, &isnull));
+    mountpoint = DatumGetTextPP(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 2, &isnull));
+    if (isnull){
+      W("The mountpoint field can't be NULL");
+      goto bailout_spi;
+    }
+
+    path = DatumGetTextPP(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 3, &isnull));
     if (isnull){
       W("The path field can't be NULL");
       goto bailout_spi;
     }
 
-    header = DatumGetByteaP(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 3, &isnull));
-    if (isnull){
-      W("The header field can't be NULL");
-      goto bailout_spi;
-    }
+    header = DatumGetByteaP(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 4, &header_isnull));
+    payload_size = DatumGetUInt64(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 5, &isnull));
+    if (isnull) payload_size = 0;
+    prepend = DatumGetByteaP(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 6, &prepend_isnull));
+    append = DatumGetByteaP(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 7, &append_isnull));
 
     /* Bind arguments */
     D2("Binding arguments for inserting file");
     rc = (sqlite3_bind_int64(stmt, 1, inode) ||
-	  sqlite3_bind_text(stmt, 2, VARDATA_ANY(path), (int)VARSIZE_ANY_EXHDR(path), SQLITE_STATIC) || // we handle destruction
-	  sqlite3_bind_blob(stmt, 3, VARDATA_ANY(header), (int)VARSIZE_ANY_EXHDR(header), SQLITE_STATIC) // we handle destruction
+	  sqlite3_bind_text(stmt, 2, VARDATA_ANY(mountpoint), (int)VARSIZE_ANY_EXHDR(mountpoint), SQLITE_STATIC) || // we handle destruction
+	  sqlite3_bind_text(stmt, 3, VARDATA_ANY(path)      , (int)VARSIZE_ANY_EXHDR(path)      , SQLITE_STATIC) || // we handle destruction
+	  ( (header_isnull) ? sqlite3_bind_null(stmt, 4)
+	                    : sqlite3_bind_blob(stmt, 4, VARDATA_ANY(header), (int)VARSIZE_ANY_EXHDR(header), SQLITE_STATIC) ) ||
+	  sqlite3_bind_int64(stmt, 5, payload_size) ||
+	  ( (prepend_isnull) ? sqlite3_bind_null(stmt, 6)
+	                     : sqlite3_bind_blob(stmt, 6, VARDATA_ANY(prepend), (int)VARSIZE_ANY_EXHDR(prepend), SQLITE_STATIC) ) ||
+	  ( (append_isnull) ? sqlite3_bind_null(stmt, 7)
+	                    : sqlite3_bind_blob(stmt, 7, VARDATA_ANY(append), (int)VARSIZE_ANY_EXHDR(append), SQLITE_STATIC) )
 	  );
     if( rc != SQLITE_OK ){
       N("SQL error binding arguments: %s", sqlite3_errmsg(db));
@@ -900,13 +955,12 @@ pg_sqlite_fs_insert_entries(PG_FUNCTION_ARGS)
 
   /* SQL prepared statement */
   rc = sqlite3_prepare_v2(db,
-			  "INSERT INTO entries(inode,name,parent_inode,decrypted_size,ctime,mtime,nlink,size,is_dir)"
-			  "VALUES(?,?,?,?,?,?,?,?,?)"
+			  "INSERT INTO entries(inode,name,parent_inode,ctime,mtime,nlink,size,is_dir)"
+			  "VALUES(?,?,?,?,?,?,?,?)"
 			  //" ON CONFLICT(inode) DO NOTHING;",
 			  " ON CONFLICT(inode) DO UPDATE SET "
 			  "name=excluded.name,"
 			  "parent_inode=excluded.parent_inode,"
-			  "decrypted_size=excluded.decrypted_size,"
 			  "ctime=excluded.ctime,"
 			  "mtime=excluded.mtime,"
 			  "nlink=excluded.nlink,"
@@ -953,18 +1007,17 @@ pg_sqlite_fs_insert_entries(PG_FUNCTION_ARGS)
   SQLITE_FS_CHECK_TYPE(0, INT8OID, "inode");
   SQLITE_FS_CHECK_TYPE(1, TEXTOID, "name");
   SQLITE_FS_CHECK_TYPE(2, INT8OID, "parent inode");
-  SQLITE_FS_CHECK_TYPE(3, TEXTOID, "decrypted_filesize");
-  SQLITE_FS_CHECK_TYPE(4, INT8OID, "created");
-  SQLITE_FS_CHECK_TYPE(5, INT8OID, "modified");
-  SQLITE_FS_CHECK_TYPE(6, INT4OID, "num_links");
-  SQLITE_FS_CHECK_TYPE(7, INT8OID, "filesize");
-  SQLITE_FS_CHECK_TYPE(8, BOOLOID, "is_dir");
+  SQLITE_FS_CHECK_TYPE(3, INT8OID, "created");
+  SQLITE_FS_CHECK_TYPE(4, INT8OID, "modified");
+  SQLITE_FS_CHECK_TYPE(5, INT4OID, "num_links");
+  SQLITE_FS_CHECK_TYPE(6, INT8OID, "filesize");
+  SQLITE_FS_CHECK_TYPE(7, BOOLOID, "is_dir");
 
   for(i=0 ; i < SPI_processed; i++){
 
     int64 inode, parent_inode, ctime, mtime, nlink, size;
-    bool is_dir, isnull_decrypted_filesize;
-    text *name, *decrypted_filesize;
+    bool is_dir;
+    text *name;
 
     rc = 1;
 
@@ -983,28 +1036,27 @@ pg_sqlite_fs_insert_entries(PG_FUNCTION_ARGS)
       W("the parent inode field can't be NULL");
       goto bailout_spi;
     }
-    decrypted_filesize = DatumGetTextPP(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 4, &isnull_decrypted_filesize));
-    ctime = DatumGetUInt64(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 5, &isnull));
+    ctime = DatumGetUInt64(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 4, &isnull));
     if (isnull){
       W("the ctime field can't be NULL");
       goto bailout_spi;
     }
-    mtime = DatumGetUInt64(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 6, &isnull));
+    mtime = DatumGetUInt64(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 5, &isnull));
     if (isnull){
       W("the mtime field can't be NULL");
       goto bailout_spi;
     }
-    nlink = DatumGetUInt32(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 7, &isnull));
+    nlink = DatumGetUInt32(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 6, &isnull));
     if (isnull){
       W("the nlink field can't be NULL");
       goto bailout_spi;
     }
-    size = DatumGetUInt64(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 8, &isnull));
+    size = DatumGetUInt64(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 7, &isnull));
     if (isnull){
       W("the size field can't be NULL");
       goto bailout_spi;
     }
-    is_dir = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 9, &isnull));
+    is_dir = DatumGetBool(SPI_getbinval(SPI_tuptable->vals[i], SPI_tuptable->tupdesc, 8, &isnull));
     if (isnull){
       W("the is_dir field can't be NULL");
       goto bailout_spi;
@@ -1015,25 +1067,17 @@ pg_sqlite_fs_insert_entries(PG_FUNCTION_ARGS)
     rc = (sqlite3_bind_int64(stmt, 1, inode) ||
 	  sqlite3_bind_text( stmt, 2, VARDATA_ANY(name), (int)VARSIZE_ANY_EXHDR(name), SQLITE_STATIC) || // we handle destruction
 	  sqlite3_bind_int64(stmt, 3, parent_inode) ||
-	  // 4: decrypted_filesize
-	  sqlite3_bind_int64(stmt, 5, ctime) ||
-	  sqlite3_bind_int64(stmt, 6, mtime) ||
-	  sqlite3_bind_int(  stmt, 7, nlink) ||
-	  sqlite3_bind_int64(stmt, 8, size) ||
-	  sqlite3_bind_int(  stmt, 9, (is_dir)?1:0)
+	  sqlite3_bind_int64(stmt, 4, ctime) ||
+	  sqlite3_bind_int64(stmt, 5, mtime) ||
+	  sqlite3_bind_int(  stmt, 6, nlink) ||
+	  sqlite3_bind_int64(stmt, 7, size) ||
+	  sqlite3_bind_int(  stmt, 8, (is_dir)?1:0)
 	  );
     if( rc != SQLITE_OK ){
       N("SQL error binding arguments: %s", sqlite3_errmsg(db));
       rc = 6;
       goto bailout_spi;
     }
-
-    if(isnull_decrypted_filesize){
-      rc = sqlite3_bind_null(stmt, 4);
-    } else {
-      rc = sqlite3_bind_text( stmt, 4, VARDATA_ANY(decrypted_filesize), (int)VARSIZE_ANY_EXHDR(decrypted_filesize), SQLITE_STATIC); // we handle destruction
-    }
-
 
     /* Execute SQL prepared statement */
     D2("Execute statement for insert file");
