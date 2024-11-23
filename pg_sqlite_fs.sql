@@ -53,6 +53,11 @@ RETURNS boolean
 AS 'MODULE_PATHNAME', 'pg_sqlite_fs_truncate_files'
 LANGUAGE C IMMUTABLE STRICT;
 
+CREATE OR REPLACE FUNCTION truncate_attributes(text)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'pg_sqlite_fs_truncate_attributes'
+LANGUAGE C IMMUTABLE STRICT;
+
 
 CREATE OR REPLACE FUNCTION insert_entry(text, bigint, text, bigint,
 		    		        ctime  bigint DEFAULT 0,

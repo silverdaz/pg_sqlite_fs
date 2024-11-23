@@ -649,6 +649,13 @@ pg_sqlite_fs_truncate_files(PG_FUNCTION_ARGS)
   PG_RETURN_BOOL(pg_sqlite_fs_truncate_table(fcinfo, "DELETE FROM files"));
 }
 
+PG_FUNCTION_INFO_V1(pg_sqlite_fs_truncate_attributes);
+Datum
+pg_sqlite_fs_truncate_attributes(PG_FUNCTION_ARGS)
+{
+  PG_RETURN_BOOL(pg_sqlite_fs_truncate_table(fcinfo, "DELETE FROM extended_attributes"));
+}
+
 
 PG_FUNCTION_INFO_V1(pg_sqlite_fs_exec);
 Datum
