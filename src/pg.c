@@ -312,12 +312,12 @@ pg_sqlite_fs_insert_file(PG_FUNCTION_ARGS)
   bytea *append = NULL;
 
   if(PG_NARGS() != 8){
-    E("Invalid number of arguments: expected 7, got %d", PG_NARGS());
+    E("Invalid number of arguments: expected 8, got %d", PG_NARGS());
     PG_RETURN_BOOL(false);
   }
 
-  if(PG_ARGISNULL(0) || PG_ARGISNULL(1) /* || PG_ARGISNULL(2) || PG_ARGISNULL(3) || PG_ARGISNULL(4) || PG_ARGISNULL(5) */){
-    E("Null arguments not accepted");
+  if(PG_ARGISNULL(0) || PG_ARGISNULL(1)){
+    E("First 2 arguments can't be null");
     PG_RETURN_BOOL(false);
   }
 
@@ -334,6 +334,7 @@ pg_sqlite_fs_insert_file(PG_FUNCTION_ARGS)
   D2("Database open: %s", db_path);
 
   /* SQL statement */
+  // 1: inode
   if(!PG_ARGISNULL(2)) mnt = PG_GETARG_TEXT_PP(2);
   if(!PG_ARGISNULL(3)) rpath = PG_GETARG_TEXT_PP(3);
   if(!PG_ARGISNULL(4)) header = PG_GETARG_BYTEA_PP(4);
