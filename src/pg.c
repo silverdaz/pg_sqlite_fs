@@ -143,6 +143,43 @@ convert_and_check_path(text *arg)
 }
 
 
+static char* schema = \
+  "CREATE TABLE IF NOT EXISTS entries ("
+  "    inode             INT64 NOT NULL PRIMARY KEY,"
+  "    name              text NOT NULL,"
+  "    parent_inode      INT64 NOT NULL REFERENCES entries(inode),"
+  "    ctime             INT64 NOT NULL DEFAULT 0,"
+  "    mtime             INT64 NOT NULL DEFAULT 0,"
+  "    nlink             INT NOT NULL DEFAULT 1,"
+  "    size              INT64 NOT NULL DEFAULT 0,"
+  "    is_dir            INT NOT NULL DEFAULT 1" // -- if 0, then JOIN with files table
+  ");"
+  "CREATE UNIQUE INDEX IF NOT EXISTS names ON entries(parent_inode, name);"
+  "INSERT INTO entries(inode, name, parent_inode) VALUES (1, '/', 1) ON CONFLICT DO NOTHING;"
+  "CREATE TABLE IF NOT EXISTS files ("
+  "  inode         INT64 PRIMARY KEY REFERENCES entries(inode),"
+  "  mountpoint    text,"
+  "  rel_path      text,"
+  "  header        BLOB,"
+  "  payload_size  INT64 NOT NULL DEFAULT 0," // (decrypted) size on disk
+  "  prepend       BLOB,"
+  "  append        BLOB"
+  ");"
+  "CREATE TABLE IF NOT EXISTS extended_attributes ("
+  "    inode             INT64 REFERENCES entries(inode),"
+  "    name              text NOT NULL,"
+  "    value             text NOT NULL,"
+  "    PRIMARY KEY(inode,name)"
+  ");"
+  "CREATE TRIGGER on_insert AFTER INSERT ON extended_attributes "
+  "BEGIN UPDATE entries SET mtime = unixepoch() WHERE inode = NEW.inode; END;"
+  "CREATE TRIGGER on_update AFTER UPDATE ON extended_attributes " 
+  "BEGIN UPDATE entries SET mtime = unixepoch() WHERE inode = OLD.inode; END;"
+  "CREATE TRIGGER on_delete AFTER DELETE ON extended_attributes " 
+  "BEGIN UPDATE entries SET mtime = unixepoch() WHERE inode = OLD.inode; END;"
+;
+  
+
 PG_FUNCTION_INFO_V1(pg_sqlite_fs_create);
 Datum
 pg_sqlite_fs_create(PG_FUNCTION_ARGS)
@@ -180,84 +217,10 @@ pg_sqlite_fs_create(PG_FUNCTION_ARGS)
   D1("Database open: %s", db_path);
 
   /* Execute SQL statement */
-  rc = sqlite3_exec(db,
-                    "CREATE TABLE IF NOT EXISTS files ("
-		    "  inode         INT64 PRIMARY KEY,"
-		    "  mountpoint    text,"
-		    "  rel_path      text,"
-		    "  header        BLOB,"
-		    "  payload_size  INT64 NOT NULL DEFAULT 0," // (decrypted) size on disk
-		    "  prepend       BLOB,"
-		    "  append        BLOB"
-		    ");",
-		    NULL, NULL, &err);
+  rc = sqlite3_exec(db, schema, NULL, NULL, &err);
    
   if( rc != SQLITE_OK ){
-    N("SQL error creating files table: %s", err);
-    rc = 2;
-    goto bailout;
-  }
-
-  rc = sqlite3_exec(db,
-                    "CREATE TABLE IF NOT EXISTS extended_attributes ("
-                    "    inode             INT64 NOT NULL,"
-                    "    name              text NOT NULL,"
-                    "    value             text NOT NULL,"
-                    "    PRIMARY KEY(inode,name)"
-                    ");",
-		    NULL, NULL, &err);
-   
-  if( rc != SQLITE_OK ){
-    N("SQL error creating the extended_attributes table: %s", err);
-    rc = 2;
-    goto bailout;
-  }
-
-  rc = sqlite3_exec(db,
-		    "CREATE TABLE IF NOT EXISTS entries ("
-		    "    inode             INT64 NOT NULL PRIMARY KEY,"
-                    "    name              text NOT NULL,"
-    		    "    parent_inode      INT64 NOT NULL REFERENCES entries(inode),"
-    		    "    ctime             INT64 NOT NULL DEFAULT 0,"
-    		    "    mtime             INT64 NOT NULL DEFAULT 0,"
-    		    "    nlink             INT NOT NULL DEFAULT 1,"
-    		    "    size              INT64 NOT NULL DEFAULT 0,"
-		    "    is_dir            INT NOT NULL DEFAULT 1" // -- if 0, then JOIN with files table
-		    ");",
-		    NULL, NULL, &err);
-   
-  if( rc != SQLITE_OK ){
-    N("SQL error creating entries table: %s", err);
-    rc = 2;
-    goto bailout;
-  }
-
-  rc = sqlite3_exec(db,
-		    "CREATE UNIQUE INDEX IF NOT EXISTS names ON entries(parent_inode, name);",
-		    NULL, NULL, &err);
-   
-  if( rc != SQLITE_OK ){
-    N("SQL error creating the entries's index: %s", err);
-    rc = 2;
-    goto bailout;
-  }
-
-  rc = sqlite3_exec(db,
-		    "CREATE INDEX IF NOT EXISTS listing ON entries(parent_inode, inode, name);",
-		    NULL, NULL, &err);
-   
-  if( rc != SQLITE_OK ){
-    N("SQL error creating the listing's index: %s", err);
-    rc = 2;
-    goto bailout;
-  }
-
-  rc = sqlite3_exec(db,
-		    "INSERT INTO entries(inode, name, parent_inode) VALUES (1, '/', 1) ON CONFLICT DO NOTHING;",
-		    NULL, NULL, &err);
-   
-  if( rc != SQLITE_OK ){
-    N("SQL error adding the root entry: %s", err);
+    N("SQL error creating schema: %s", err);
     rc = 2;
     goto bailout;
   }
