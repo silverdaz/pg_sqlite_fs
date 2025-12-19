@@ -43,6 +43,20 @@ AS 'MODULE_PATHNAME', 'pg_sqlite_fs_delete_file'
 LANGUAGE C IMMUTABLE STRICT;
 -- STRICT  = NULL parameters return NULL immediately
 
+CREATE OR REPLACE FUNCTION insert_attribute(filename text,
+                                            inode bigint, name text, value text)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'pg_sqlite_fs_insert_attribute'
+LANGUAGE C IMMUTABLE; -- NO STRICT
+
+CREATE OR REPLACE FUNCTION delete_attribute(filename text,
+                                            inode bigint, name text)
+RETURNS boolean
+AS 'MODULE_PATHNAME', 'pg_sqlite_fs_delete_attribute'
+LANGUAGE C IMMUTABLE STRICT;
+-- STRICT  = NULL parameters return NULL immediately
+
+
 CREATE OR REPLACE FUNCTION truncate_entries(text)
 RETURNS boolean
 AS 'MODULE_PATHNAME', 'pg_sqlite_fs_truncate_entries'

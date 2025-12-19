@@ -258,6 +258,10 @@ pg_sqlite_fs_remove(PG_FUNCTION_ARGS)
   PG_RETURN_BOOL((unlink(db_path))?false:true);
 }
 
+/***************************************
+         Insert functions
+ ***************************************/
+
 
 PG_FUNCTION_INFO_V1(pg_sqlite_fs_insert_file);
 Datum
@@ -468,6 +472,102 @@ bailout:
 }
 
 
+PG_FUNCTION_INFO_V1(pg_sqlite_fs_insert_attribute);
+Datum
+pg_sqlite_fs_insert_attribute(PG_FUNCTION_ARGS)
+{
+
+  int rc = 1;
+  char* db_path;
+  sqlite3 *db;
+  sqlite3_stmt *stmt = NULL;
+  text* name;
+  text* value;
+  int64 inode;
+
+
+  if(PG_NARGS() < 4){
+    E("Invalid number of arguments: expected at least 4, got %d", PG_NARGS());
+    PG_RETURN_BOOL(false);
+  }
+
+  if(PG_ARGISNULL(0) || PG_ARGISNULL(1) || PG_ARGISNULL(2) || PG_ARGISNULL(3)){
+    E("Null arguments not accepted");
+    PG_RETURN_BOOL(false);
+  }
+
+  db_path = convert_and_check_path(PG_GETARG_TEXT_PP(0)); // allocated in the function context: will be cleaned by PG
+
+  rc = sqlite3_open(db_path, &db); // SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+
+  if( rc ) {
+    N("Can't open database %s: %s", db_path, sqlite3_errmsg(db));
+    rc = 1;
+    goto bailout;
+  }
+
+  D2("Database open: %s", db_path);
+
+  inode = PG_GETARG_INT64(1);
+  name = PG_GETARG_TEXT_PP(2);
+  value = PG_GETARG_TEXT_PP(3);
+
+  D2("Inserting attribute [%ld] %*s = %*s", inode,
+     (int)VARSIZE_ANY_EXHDR(name), VARDATA_ANY(name),
+     (int)VARSIZE_ANY_EXHDR(value), VARDATA_ANY(value));
+
+  /* SQL statement */
+  rc = sqlite3_prepare_v2(db,
+			  "INSERT INTO extended_attributes(inode,name,value) "
+			  "VALUES(?,?,?) "
+			  "ON CONFLICT DO UPDATE SET value=excluded.value;",
+			  -1, &stmt, NULL);
+  if( rc != SQLITE_OK ) {
+    N("Error preparing statement: %s", sqlite3_errmsg(db));
+    rc = 1;
+    goto bailout;
+  }
+
+  /* Bind arguments */
+  D2("Binding arguments while inserting entry");
+
+  rc = rc ||
+    (sqlite3_bind_int64(stmt, 1, inode) ||
+     sqlite3_bind_text( stmt, 2, VARDATA_ANY(name), (int)VARSIZE_ANY_EXHDR(name), SQLITE_STATIC) || // we handle destruction
+     sqlite3_bind_text( stmt, 3, VARDATA_ANY(value), (int)VARSIZE_ANY_EXHDR(value), SQLITE_STATIC) // we handle destruction
+     );
+  if( rc != SQLITE_OK ) {
+    N("Error binding main arguments: %s", sqlite3_errmsg(db));
+    rc = 2;
+    goto bailout;
+  }
+
+  /* Execute SQL prepared statement */
+  D2("Execute statement for insert attribute");
+  rc = sqlite3_step(stmt);
+  if( rc != SQLITE_DONE ){
+    N("SQL error inserting entry: %ld | error %d: %s", inode, rc, sqlite3_errstr(rc));
+    rc = 3;
+    goto bailout;
+  }
+
+  D3("Successfully inserted attribute [%ld] %*s=%*s", inode,
+     (int)VARSIZE_ANY_EXHDR(name), VARDATA_ANY(name),
+     (int)VARSIZE_ANY_EXHDR(value), VARDATA_ANY(value));
+  rc = 0; // success
+  
+bailout:
+  if(stmt) sqlite3_finalize(stmt);
+  sqlite3_close(db);
+  PG_RETURN_BOOL(((rc)?false:true));
+}
+
+
+/***************************************
+         Delete functions
+ ***************************************/
+
+
 PG_FUNCTION_INFO_V1(pg_sqlite_fs_delete_file);
 Datum
 pg_sqlite_fs_delete_file(PG_FUNCTION_ARGS)
@@ -568,6 +668,76 @@ bailout:
     PG_RETURN_BOOL(((rc)?false:true));
 }
 
+
+PG_FUNCTION_INFO_V1(pg_sqlite_fs_delete_attribute);
+Datum
+pg_sqlite_fs_delete_attribute(PG_FUNCTION_ARGS)
+{
+    int rc = 1;
+    char* db_path;
+    int64 inode;
+    sqlite3 *db;
+    sqlite3_stmt *stmt = NULL;
+    text* name;
+  
+    db_path = convert_and_check_path(PG_GETARG_TEXT_PP(0)); // allocated in the function context: will be cleaned by PG
+    N("Opening database %s", db_path);
+
+    rc = sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READWRITE, NULL);
+    if( rc != SQLITE_OK )
+      E("SQL error opening database: %s | error %d: %s", db_path, rc, sqlite3_errstr(rc));
+	
+    rc = sqlite3_prepare_v2(db,
+			   "DELETE FROM extended_attributes WHERE inode = ?1 OR name = ?2;",
+			   -1, &stmt, NULL);
+
+    if( rc != SQLITE_OK ) {
+      N("Error preparing statement: %s", sqlite3_errmsg(db));
+      rc = 1;
+      goto bailout;
+    }
+
+    inode = PG_GETARG_INT64(1);
+    name = PG_GETARG_TEXT_PP(2);
+
+    D2("Deleting attribute [%ld] %*s", inode, (int)VARSIZE_ANY_EXHDR(name), VARDATA_ANY(name));
+
+    /* Bind arguments */
+    D2("Binding arguments while deleting attribute");
+
+    rc = (sqlite3_bind_int64(stmt, 1, inode) ||
+	  sqlite3_bind_text( stmt, 2, VARDATA_ANY(name), (int)VARSIZE_ANY_EXHDR(name), SQLITE_STATIC) // we handle destruction
+	  );
+
+    if( rc != SQLITE_OK ) {
+      N("Error binding main arguments: %s", sqlite3_errmsg(db));
+      goto bailout;
+    }
+
+    /* Execute SQL prepared statement */
+    D1("Execute statement for deleting an attribute");
+    while(1){
+      rc = sqlite3_step(stmt);
+      if( rc == SQLITE_DONE ){
+	rc = 0; // success
+	goto bailout;
+      }
+      if( rc != SQLITE_ROW ) {
+	N("Error: %s", sqlite3_errmsg(db));
+	rc = 1;
+	goto bailout;
+      }
+    }
+
+bailout:
+    if(stmt) sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    PG_RETURN_BOOL(((rc)?false:true));
+}
+
+/***************************************
+         Truncate functions
+ ***************************************/
 
 static bool
 pg_sqlite_fs_truncate_table(PG_FUNCTION_ARGS, const char* sql)
