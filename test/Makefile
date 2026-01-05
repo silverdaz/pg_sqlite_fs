@@ -75,7 +75,7 @@ compare: compare-entries compare-files compare-xattr
 
 
 clean:
-	rm -rf $(SQLITE_DIR)
+	rm -rf $(SQLITE)
 
 
 .PHONY:mount unmount
