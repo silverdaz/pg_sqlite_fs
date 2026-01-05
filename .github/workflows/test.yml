@@ -11,7 +11,7 @@ jobs:
     - uses: actions/checkout@v4
     - name: Install dependencies
       run: |
-        sudo apt install -y sqlite3 make gcc fuse3 libsodium-dev libssl-dev pkg-config autoconf automake
+        sudo apt install -y sqlite3 make gcc fuse3 libfuse3-dev libsodium-dev libssl-dev pkg-config autoconf automake
     - name: Generate an SQLite box
       run: |
         make -C test latest up wait init insert
