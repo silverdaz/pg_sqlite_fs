@@ -1,0 +1,4 @@
+222|/path/to|file1.txt|==== header 1 ====
+|
+333|/other/path/to|file2.txt||
+==== footer 2 ====

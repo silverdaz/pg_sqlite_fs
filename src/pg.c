@@ -142,12 +142,12 @@ convert_and_check_path(text *arg)
   return path;
 }
 
-
 static char* schema = \
   "CREATE TABLE IF NOT EXISTS entries ("
   "    inode             INT64 NOT NULL PRIMARY KEY,"
   "    name              text NOT NULL,"
-  "    parent_inode      INT64 NOT NULL REFERENCES entries(inode),"
+  "    parent_inode      INT64 NOT NULL REFERENCES entries(inode) ON DELETE CASCADE "
+  "                                     NOT DEFERRABLE INITIALLY IMMEDIATE,"
   "    ctime             INT64 NOT NULL DEFAULT 0,"
   "    mtime             INT64 NOT NULL DEFAULT 0,"
   "    nlink             INT NOT NULL DEFAULT 1,"
@@ -157,7 +157,8 @@ static char* schema = \
   "CREATE UNIQUE INDEX IF NOT EXISTS names ON entries(parent_inode, name);"
   "INSERT INTO entries(inode, name, parent_inode) VALUES (1, '/', 1) ON CONFLICT DO NOTHING;"
   "CREATE TABLE IF NOT EXISTS files ("
-  "  inode         INT64 PRIMARY KEY REFERENCES entries(inode),"
+  "  inode         INT64 PRIMARY KEY REFERENCES entries(inode) ON DELETE CASCADE "
+  "                                  NOT DEFERRABLE INITIALLY IMMEDIATE,"
   "  mountpoint    text,"
   "  rel_path      text,"
   "  header        BLOB,"
@@ -166,7 +167,8 @@ static char* schema = \
   "  append        BLOB"
   ");"
   "CREATE TABLE IF NOT EXISTS extended_attributes ("
-  "    inode             INT64 REFERENCES entries(inode),"
+  "    inode             INT64 REFERENCES entries(inode) ON DELETE CASCADE "
+  "                            NOT DEFERRABLE INITIALLY IMMEDIATE,"
   "    name              text NOT NULL,"
   "    value             text NOT NULL,"
   "    PRIMARY KEY(inode,name)"
@@ -257,10 +259,6 @@ pg_sqlite_fs_remove(PG_FUNCTION_ARGS)
 
   PG_RETURN_BOOL((unlink(db_path))?false:true);
 }
-
-/***************************************
-         Insert functions
- ***************************************/
 
 
 PG_FUNCTION_INFO_V1(pg_sqlite_fs_insert_file);
@@ -471,7 +469,6 @@ bailout:
   PG_RETURN_BOOL(((rc)?false:true));
 }
 
-
 PG_FUNCTION_INFO_V1(pg_sqlite_fs_insert_attribute);
 Datum
 pg_sqlite_fs_insert_attribute(PG_FUNCTION_ARGS)
@@ -518,9 +515,9 @@ pg_sqlite_fs_insert_attribute(PG_FUNCTION_ARGS)
 
   /* SQL statement */
   rc = sqlite3_prepare_v2(db,
-			  "INSERT INTO extended_attributes(inode,name,value) "
-			  "VALUES(?,?,?) "
-			  "ON CONFLICT DO UPDATE SET value=excluded.value;",
+			  "INSERT INTO extended_attributes(inode,name,value)"
+			  "VALUES(?,?,?)"
+			  " ON CONFLICT(inode,name) DO UPDATE SET value=excluded.value;",
 			  -1, &stmt, NULL);
   if( rc != SQLITE_OK ) {
     N("Error preparing statement: %s", sqlite3_errmsg(db));
@@ -561,11 +558,6 @@ bailout:
   sqlite3_close(db);
   PG_RETURN_BOOL(((rc)?false:true));
 }
-
-
-/***************************************
-         Delete functions
- ***************************************/
 
 
 PG_FUNCTION_INFO_V1(pg_sqlite_fs_delete_file);
@@ -632,11 +624,15 @@ pg_sqlite_fs_delete_entry(PG_FUNCTION_ARGS)
     rc = sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READWRITE, NULL);
     if( rc != SQLITE_OK )
       E("SQL error opening database: %s | error %d: %s", db_path, rc, sqlite3_errstr(rc));
-	
+
+    rc = sqlite3_exec(db, "PRAGMA foreign_keys = ON",0,NULL,NULL);
+    if( rc != SQLITE_OK ) {
+      N("Error turning foreign keys support ON: %s", sqlite3_errmsg(db));
+      goto bailout;
+    }
+
     rc = sqlite3_prepare_v2(db,
-			   "DELETE FROM entries WHERE inode = ?1 OR parent_inode = ?1;",
-			    // Note: in case of directory: missing some sub-directories
-			    // => Use recursive with condition
+			   "DELETE FROM entries WHERE inode = ?1;",
 			   -1, &stmt, NULL);
 
     inode = PG_GETARG_INT64(1);
@@ -668,7 +664,6 @@ bailout:
     PG_RETURN_BOOL(((rc)?false:true));
 }
 
-
 PG_FUNCTION_INFO_V1(pg_sqlite_fs_delete_attribute);
 Datum
 pg_sqlite_fs_delete_attribute(PG_FUNCTION_ARGS)
@@ -688,7 +683,7 @@ pg_sqlite_fs_delete_attribute(PG_FUNCTION_ARGS)
       E("SQL error opening database: %s | error %d: %s", db_path, rc, sqlite3_errstr(rc));
 	
     rc = sqlite3_prepare_v2(db,
-			   "DELETE FROM extended_attributes WHERE inode = ?1 OR name = ?2;",
+			   "DELETE FROM extended_attributes WHERE inode = ?1 AND name = ?2;",
 			   -1, &stmt, NULL);
 
     if( rc != SQLITE_OK ) {
@@ -735,9 +730,73 @@ bailout:
     PG_RETURN_BOOL(((rc)?false:true));
 }
 
-/***************************************
-         Truncate functions
- ***************************************/
+PG_FUNCTION_INFO_V1(pg_sqlite_fs_delete_attributes);
+Datum
+pg_sqlite_fs_delete_attributes(PG_FUNCTION_ARGS)
+{
+    int rc = 1;
+    char* db_path;
+    int64 inode;
+    sqlite3 *db;
+    sqlite3_stmt *stmt = NULL;
+  
+    db_path = convert_and_check_path(PG_GETARG_TEXT_PP(0)); // allocated in the function context: will be cleaned by PG
+    N("Opening database %s", db_path);
+
+    rc = sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READWRITE, NULL);
+    if( rc != SQLITE_OK )
+      E("SQL error opening database: %s | error %d: %s", db_path, rc, sqlite3_errstr(rc));
+	
+    rc = sqlite3_prepare_v2(db,
+			   "DELETE FROM extended_attributes WHERE inode = ?1;",
+			   -1, &stmt, NULL);
+
+    if( rc != SQLITE_OK ) {
+      N("Error preparing statement: %s", sqlite3_errmsg(db));
+      rc = 1;
+      goto bailout;
+    }
+
+    inode = PG_GETARG_INT64(1);
+
+    D2("Deleting all attributes of [%ld]", inode);
+
+    /* Bind arguments */
+    D2("Binding arguments while deleting attribute");
+    rc = sqlite3_bind_int64(stmt, 1, inode);
+    if( rc != SQLITE_OK ) {
+      N("Error binding main arguments: %s", sqlite3_errmsg(db));
+      goto bailout;
+    }
+
+    /* Execute SQL prepared statement */
+    D1("Execute statement for deleting an attribute");
+    while(1){
+      rc = sqlite3_step(stmt);
+      if( rc == SQLITE_DONE ){
+	rc = 0; // success
+	goto bailout;
+      }
+      if( rc != SQLITE_ROW ) {
+	N("Error: %s", sqlite3_errmsg(db));
+	rc = 1;
+	goto bailout;
+      }
+    }
+
+bailout:
+    if(stmt) sqlite3_finalize(stmt);
+    sqlite3_close(db);
+    PG_RETURN_BOOL(((rc)?false:true));
+}
+
+
+
+
+
+
+
+
 
 static bool
 pg_sqlite_fs_truncate_table(PG_FUNCTION_ARGS, const char* sql)
@@ -772,7 +831,7 @@ PG_FUNCTION_INFO_V1(pg_sqlite_fs_truncate_entries);
 Datum
 pg_sqlite_fs_truncate_entries(PG_FUNCTION_ARGS)
 {
-  PG_RETURN_BOOL(pg_sqlite_fs_truncate_table(fcinfo, "DELETE FROM entries WHERE inode > 1"));
+  PG_RETURN_BOOL(pg_sqlite_fs_truncate_table(fcinfo, "PRAGMA foreign_keys = ON; DELETE FROM entries WHERE inode > 1"));
 }
 
 PG_FUNCTION_INFO_V1(pg_sqlite_fs_truncate_files);
@@ -790,7 +849,8 @@ pg_sqlite_fs_truncate_attributes(PG_FUNCTION_ARGS)
   PG_RETURN_BOOL(pg_sqlite_fs_truncate_table(fcinfo, "DELETE FROM extended_attributes"));
 }
 
-
+// ========================================
+#if 0
 PG_FUNCTION_INFO_V1(pg_sqlite_fs_exec);
 Datum
 pg_sqlite_fs_exec(PG_FUNCTION_ARGS)
@@ -844,6 +904,9 @@ bailout:
   sqlite3_close(db);
   PG_RETURN_BOOL(((rc)?false:true));
 }
+#endif
+// ========================================
+
 
 
 

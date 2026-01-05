@@ -1,0 +1,19 @@
+name: Testsuite
+
+on: [push]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install dependencies
+      run: |
+        sudo apt install -y sqlite3 make
+    - name: Running Tests
+      run: |
+        make -C test latest up wait init insert
+        make -C test compare
+        make -C test distclean down
