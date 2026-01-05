@@ -35,3 +35,6 @@ COPY --from=BUILD /usr/lib/postgresql/18                  /usr/lib/postgresql/18
 COPY --from=BUILD /usr/share/postgresql/18                /usr/share/postgresql/18
 
 RUN ldconfig -v
+
+# We are the root user
+RUN echo "umask 000" > ~/.bashrc

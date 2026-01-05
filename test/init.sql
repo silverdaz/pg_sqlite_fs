@@ -1,4 +1,5 @@
 ALTER SYSTEM SET sqlite_fs.location TO '/data/sqlite-boxes';
+ALTER SYSTEM SET log_min_messages TO 'debug1';
 SELECT pg_reload_conf();
 
 
@@ -44,17 +45,17 @@ DECLARE
    rec record;
 BEGIN
 
-	RAISE NOTICE 'path for box is %', _box_path;
-
  	IF (_reset) THEN
 	        RAISE NOTICE 'Deleting %', _box_path;
  		PERFORM sqlite_fs.remove(_box_path); -- maybe better just truncate
  	END IF;
 
  	--create box
- 	PERFORM sqlite_fs.make(_box_path);
+	RAISE NOTICE 'Creating is %', _box_path;
+ 	PERFORM sqlite_fs.make(_box_path, umask => 0o000); -- everybody can read and write. Ok for our testing
 
 	--Create dbox content entries and files' info
+	RAISE NOTICE 'Inserting entries';
 	FOR rec IN (
 		SELECT f.inode AS ino,
 		       f.name AS display_name,

@@ -19,7 +19,7 @@ $$;
 -- -- STRICT  = NULL parameters return NULL immediately
 
 
-CREATE OR REPLACE FUNCTION make(text)
+CREATE OR REPLACE FUNCTION make(filepath text, umask integer default 0o007)
 RETURNS boolean
 AS 'MODULE_PATHNAME', 'pg_sqlite_fs_create'
 LANGUAGE C IMMUTABLE STRICT;

@@ -7,12 +7,11 @@ build latest:
 	cd .. && docker build $(ARGS) -t pg_sqlite_fs:$@ -f test/Dockerfile .
 
 SQLITE_NAME=test-box.sqlite
-SQLITE_DIR=/tmp/sqlite-boxes
+SQLITE_DIR=/mnt/sqlite-boxes
 SQLITE=$(SQLITE_DIR)/$(SQLITE_NAME)
 
 $(SQLITE_DIR):
-	mkdir $@
-	chmod o+rwx $@
+	sudo mkdir -p -m 777 $@
 
 up: | $(SQLITE_DIR)
 	docker run -d --rm --name pg-test \
@@ -25,6 +24,9 @@ down:
 
 exec:
 	docker exec -it pg-test bash
+
+logs:
+	docker logs -f pg-test
 
 wait:
 	@sleep 3
@@ -42,8 +44,8 @@ $(SQLITE):
 
 gen: $(SQLITE)
 
-
 adjust: $(SQLITE)
+	sudo chmod 666 $<
 	sqlite3 $< "UPDATE files SET mountpoint = '$(shell pwd)'"
 
 
@@ -74,15 +76,16 @@ compare: compare-entries compare-files compare-xattr
 
 clean:
 	rm -rf $(SQLITE_DIR)
-distclean: clean
-	rm -rf exports
 
 
 .PHONY:mount unmount
-mount: $(SQLITE) | mnt
-	mkdir -p -m 700 $|
+$(SQLITE_DIR)/mnt:
+	mkdir -m 700 $@
+mount: $(SQLITE) | $(SQLITE_DIR)/mnt
 	crypt4gh-sqlite.fs -o ro,default_permissions,allow_root $< $|
+unmount:
+	umount $(SQLITE_DIR)/mnt
 
-unmount: | mnt
-	umount $|
-
+check:
+	diff $(SQLITE_DIR)/mnt/dir1/subdir1/my-file1.txt exports/full-file1.txt
+	diff $(SQLITE_DIR)/mnt/dir2/subdir2/my-file2.txt exports/full-file2.txt

@@ -191,27 +191,29 @@ pg_sqlite_fs_create(PG_FUNCTION_ARGS)
   char* db_path;
   char* err = NULL;
   sqlite3 *db;
-  mode_t m;
+  mode_t m, old_mask;
 
-  if(PG_NARGS() != 1){
-    E("Invalid number of arguments: expected 1, got %d", PG_NARGS());
+  if(PG_NARGS() != 2){
+    E("Invalid number of arguments: expected 2, got %d", PG_NARGS());
     PG_RETURN_BOOL(false);
   }
 
-  if(PG_ARGISNULL(0)){
+  if(PG_ARGISNULL(0) || PG_ARGISNULL(1)){
     E("Null arguments not accepted");
     PG_RETURN_BOOL(false);
   }
 
   db_path = convert_and_check_path(PG_GETARG_TEXT_PP(0)); // allocated in the function context: will be cleaned by PG
+  m = PG_GETARG_INT32(1); // Laaarge enough!
 
-  m = umask(0007);
-  D2("Database open: %s | mask: %o", db_path, m);
+  N("Database create: %s | desired mask: %o", db_path, m);
+  old_mask = umask(m);
+  N("old mask: %o", old_mask);
 
   rc = sqlite3_open(db_path, &db); // SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
 
   if( rc ) {
-    N("Can't open database %s: %s", db_path, sqlite3_errmsg(db));
+    E("Can't open database %s: %s", db_path, sqlite3_errmsg(db));
     rc = 1;
     goto bailout;
   }
@@ -233,7 +235,7 @@ pg_sqlite_fs_create(PG_FUNCTION_ARGS)
 bailout:
   if(err) sqlite3_free(err);
   sqlite3_close(db);
-  (void)umask(m); // reset back to old mask
+  (void)umask(old_mask); // reset back to old mask
   PG_RETURN_BOOL(((rc)?false:true));
 }
 
