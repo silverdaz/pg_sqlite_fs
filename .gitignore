@@ -5,6 +5,7 @@
 *.old
 tmp
 pg_sqlite_fs--*
+crypt4gh-sqlite
 
 
 # Prerequisites

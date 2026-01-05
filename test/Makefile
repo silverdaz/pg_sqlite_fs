@@ -46,9 +46,6 @@ gen: $(SQLITE)
 adjust: $(SQLITE)
 	sqlite3 $< "UPDATE files SET mountpoint = '$(shell pwd)'"
 
-.PHONY:mnt
-mnt: $(SQLITE)
-	/home/daz/Workspace/crypt4gh-sqlite/crypt4gh-sqlite.fs -f -o local_debug=3,ro,default_permissions,allow_root $< $@
 
 
 output.entries.txt: $(SQLITE)
@@ -64,18 +61,28 @@ compare-%: output.%.txt
 	diff output.$*.txt exports/$*.txt
 compare: compare-entries compare-files compare-xattr
 
-exports:
-	mkdir $@
-exports/entries.txt: $(SQLITE) | exports
-	sqlite3 $< 'SELECT inode, name, parent_inode, is_dir, size, nlink FROM entries' > $@
-exports/files.txt: $(SQLITE) | exports
-	sqlite3 $< 'SELECT inode, mountpoint, rel_path, prepend, append FROM files' > $@
-exports/xattr.txt: $(SQLITE) | exports
-	sqlite3 $< 'SELECT * FROM extended_attributes' > $@
-export-all: exports/entries.txt exports/files.txt exports/xattr.txt
+# exports:
+# 	mkdir $@
+# exports/entries.txt: $(SQLITE) | exports
+# 	sqlite3 $< 'SELECT inode, name, parent_inode, is_dir, size, nlink FROM entries' > $@
+# exports/files.txt: $(SQLITE) | exports
+# 	sqlite3 $< 'SELECT inode, mountpoint, rel_path, prepend, append FROM files' > $@
+# exports/xattr.txt: $(SQLITE) | exports
+# 	sqlite3 $< 'SELECT * FROM extended_attributes' > $@
+# export-all: exports/entries.txt exports/files.txt exports/xattr.txt
 
 
 clean:
 	rm -rf $(SQLITE_DIR)
 distclean: clean
 	rm -rf exports
+
+
+.PHONY:mount unmount
+mount: $(SQLITE) | mnt
+	mkdir -p -m 700 $|
+	crypt4gh-sqlite.fs -o ro,default_permissions,allow_root $< $|
+
+unmount: | mnt
+	umount $|
+

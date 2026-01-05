@@ -11,9 +11,28 @@ jobs:
     - uses: actions/checkout@v4
     - name: Install dependencies
       run: |
-        sudo apt install -y sqlite3 make
-    - name: Running Tests
+        sudo apt install -y sqlite3 make gcc fuse3 libsodium-dev libssl-dev pkg-config autoconf automake
+    - name: Generate an SQLite box
       run: |
-        make -C test latest up wait init insert
+        make -C test latest up wait init insert clean gen down
+    - name: Comparing outputs
+      run: |
         make -C test compare
-        make -C test distclean down
+    - name: Install crypt4gh-sqlite
+      run: |
+        git clone https://github.com/silverdaz/crypt4gh-sqlite.git
+        cd crypt4gh-sqlite
+        autoreconf -i
+        ./configure
+        make
+        sudo make install
+        sudo sed -i '/user_allow_other/s/^#.*user_allow_other$/user_allow_other/' /usr/local/etc/fuse.conf
+    - name: Mounting the box and compare files
+      run: |
+        make -C test adjust mount
+        diff test/mnt/dir1/subdir1/my-file1.txt test/export/full-file1.txt
+        diff test/mnt/dir2/subdir2/my-file2.txt test/export/full-file2.txt
+    - name: Clean up
+      run: |
+        make -C test unmount
+        make -C test distclean
