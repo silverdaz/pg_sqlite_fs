@@ -28,7 +28,7 @@ jobs:
         ./configure
         make
         sudo make install
-        sudo sed -i '/user_allow_other/s/^#.*user_allow_other$/user_allow_other/' /usr/local/etc/fuse.conf
+        sudo sed -i '/user_allow_other/s/^#.*user_allow_other$/user_allow_other/' /etc/fuse.conf
     - name: Mounting the box and compare files
       run: |
         make -C test adjust mount
