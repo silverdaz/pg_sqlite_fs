@@ -14,7 +14,7 @@ jobs:
         sudo apt install -y sqlite3 make gcc fuse3 libsodium-dev libssl-dev pkg-config autoconf automake
     - name: Generate an SQLite box
       run: |
-        make -C test latest up wait init insert clean gen down
+        make -C test latest up wait init insert clean gen
     - name: Comparing outputs
       run: |
         make -C test compare
@@ -34,5 +34,4 @@ jobs:
         diff test/mnt/dir2/subdir2/my-file2.txt test/export/full-file2.txt
     - name: Clean up
       run: |
-        make -C test unmount
-        make -C test distclean
+        make -C test unmount distclean down
